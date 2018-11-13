@@ -18,10 +18,10 @@ from keras.models import load_model
 
 import matplotlib.pyplot as plt
 
-def plot_confidence_in_true_label(labels, predProba=None, data=None, model=None):
+def plot_confidence_in_true_label(labels, predProba=None, data=None, model=None, ax=None):
     """ Plot the confidence of the input separated by true class label.
 
-    If predictions are given, the other three keyword arguments must be given in order
+    If predictions are not given, the other three keyword arguments must be given in order
     to be able to calculate these predictions. If predictions is not None, the other three
     inputs are ignored.
 
@@ -37,7 +37,10 @@ def plot_confidence_in_true_label(labels, predProba=None, data=None, model=None)
         e.g.: [0,1,0,0,3,4,1,...] for 4 (or more) classes
     model : model [None]
         Trained model, which has a method called predcit_proba to predict the class confidence.
+    ax : plt.axes or None
+        If given all plots are drawn into this axis object
     """
+
     if predProba is None:
         if model is None or data is None:
             raise ValueError("If predictions is None, a model and the data has to be provided.")
@@ -49,6 +52,10 @@ def plot_confidence_in_true_label(labels, predProba=None, data=None, model=None)
     nr_classes = len(set(labels))
     if nr_classes > 3:
         raise ValueError("Not implemented for more than 3 classes due to missing colors.")
+
+    fig = plt.figure(figsize=(20, 10))
+    if ax is None:
+        ax = plt.gca()
 
     pred = np.argmax(predProba, axis=1)
     X = []
@@ -72,20 +79,19 @@ def plot_confidence_in_true_label(labels, predProba=None, data=None, model=None)
         color.append(["#003668", "#8B0000", "#000000"][i])
         color.append(["#7fa1c1", "#d09999", "#7F7F7F"][i])
 
-    fig = plt.figure(figsize=(20,10))
-    plt.hist(X, histtype="barstacked", bins=20, label=label, color=color)
-    plt.axvline(x=1/nr_classes, color="k", linewidth=3, linestyle="--", alpha=0.6)
-    plt.axvline(x=0.5, color="k", linewidth=3, linestyle="--", alpha=0.6)
-    plt.legend(fontsize=20)
-    plt.xlabel("P(pred)")
-    plt.ylabel("Count")
-    plt.title("True label vs. confidence (Recall)\n(True: Recall, False: Precision)",fontsize=20)
-    plt.xticks(np.arange(0, 1, 0.1))
+    ax.hist(X, histtype="barstacked", bins=20, label=label, color=color)
+    ax.axvline(x=1/nr_classes, color="k", linewidth=3, linestyle="--", alpha=0.6)
+    ax.axvline(x=0.5, color="k", linewidth=3, linestyle="--", alpha=0.6)
+    ax.legend(fontsize=20)
+    ax.set_xlabel("P(pred)")
+    ax.set_ylabel("Count")
+    ax.set_title("True label vs. confidence (Recall)\n(True: Recall, False: Precision)",fontsize=20)
+    ax.set_xticks(np.arange(0, 1.15, 0.1))
 
-    return fig
+    return fig, ax
 
 
-def plot_confidence_in_predicted_label(labels, predProba=None, data=None, model=None):
+def plot_confidence_in_predicted_label(labels, predProba=None, data=None, model=None, ax=None):
     """ Plot the confidence of the input separated by predicted class label.
 
     If predictions are given, the other three keyword arguments must be given in order
@@ -104,6 +110,8 @@ def plot_confidence_in_predicted_label(labels, predProba=None, data=None, model=
         e.g.: [0,1,0,0,3,4,1,...] for 4 (or more) classes
     model : model [None]
         Trained model, which has a method called predcit_proba to predict the class confidence.
+    ax : plt.axes or None
+        If given all plots are drawn into this axis object
     """
     if predProba is None:
         if model is None or data is None:
@@ -116,6 +124,10 @@ def plot_confidence_in_predicted_label(labels, predProba=None, data=None, model=
     nr_classes = len(set(labels))
     if nr_classes > 3:
         raise ValueError("Not implemented for more than 3 classes due to missing colors.")
+
+    fig = plt.figure(figsize=(20, 10))
+    if ax is None:
+        ax = plt.gca()
 
     pred = np.argmax(predProba, axis=1)
     X = []
@@ -139,17 +151,16 @@ def plot_confidence_in_predicted_label(labels, predProba=None, data=None, model=
         color.append(["#003668", "#8B0000", "#000000"][i])
         color.append(["#7fa1c1", "#d09999", "#7F7F7F"][i])
 
-    fig = plt.figure(figsize=(20,10))
-    plt.hist(X, histtype="barstacked", bins=20, label=label, color=color)
-    plt.axvline(x=1/nr_classes, color="k", linewidth=3, linestyle="--", alpha=0.6)
-    plt.axvline(x=0.5, color="k", linewidth=3, linestyle="--", alpha=0.6)
-    plt.legend(fontsize=20)
-    plt.xlabel("P(pred)")
-    plt.ylabel("Count")
-    plt.title("Predicted label vs confidence (Precision)\n[red PREDICTED increase, blue PREDICTED decrease, black PREDICTED unchanged]\n(True: Recall, False: Precision)", fontsize=20)
-    plt.xticks(np.arange(0, 1, 0.1))
+    ax.hist(X, histtype="barstacked", bins=20, label=label, color=color)
+    ax.axvline(x=1/nr_classes, color="k", linewidth=3, linestyle="--", alpha=0.6)
+    ax.axvline(x=0.5, color="k", linewidth=3, linestyle="--", alpha=0.6)
+    ax.legend(fontsize=20)
+    ax.set_xlabel("P(pred)")
+    ax.set_ylabel("Count")
+    ax.set_title("Predicted label vs confidence (Precision)\n(True: Recall, False: Precision)", fontsize=20)
+    ax.set_xticks(np.arange(0, 1.15, 0.1))
 
-    return fig
+    return fig, ax
 
 
 if __name__ == "__main__":
