@@ -20,10 +20,9 @@ import matplotlib.pyplot as plt
 
 from xgboost import XGBClassifier
 from collections import defaultdict, Counter
-from sklearn.feature_selection import SelectFromModel
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sklearn.metrics import accuracy_score, roc_auc_score, f1_score
 from ModelAnalysis import plot_confidence_in_predicted_label, plot_confidence_in_true_label
-
 
 def savefig(list_of_plots, path):
     import matplotlib.backends.backend_pdf
@@ -88,6 +87,8 @@ class FullXGB():
 
         # Save all important scores later on
         self.scores = defaultdict(list)
+        self.weak_successions = {}
+        self.strong_successions = {}
 
         # Select plot settings
         matplotlib.rcParams["axes.titlesize"] = 30
@@ -300,6 +301,7 @@ class FullXGB():
         """
         self.model.get_booster().dump_model(self.save_folder+"/xgb_model.txt", with_stats=True)
         split = re.compile('(\s*)([0-9]+):\[([^<>]+)<(-?[0-9]+[\.0-9]*)\]')
+        leaf = re.compile('(\s*)([0-9]+:leaf)')
         boosters = []
         with open(self.save_folder+'/xgb_model.txt', 'r') as f:
             lines = f.readlines()
@@ -310,6 +312,9 @@ class FullXGB():
                 tree_node = re.findall(split, line)
                 if tree_node:
                     boosters[-1].append(tree_node[0])
+                tree_leaf = re.findall(leaf, line)
+                if tree_leaf:
+                    boosters[-1].append(tree_leaf[0])
 
         boosters = np.array(boosters)
         self.trees = boosters
@@ -330,16 +335,17 @@ class FullXGB():
 
         for tree in self.trees:
             for node in tree:
-                feature = node[2]
-                depth = node[0].count("\t")
-                cut_hierachy.loc[feature, "Pos{}".format(depth)] += 1
+                if "leaf" not in node[1]:
+                    feature = node[2]
+                    depth = node[0].count("\t")
+                    cut_hierachy.loc[feature, "Pos{}".format(depth)] += 1
 
         for col in cut_hierachy.columns:
             cut_hierachy["%{}".format(col)] = np.round(cut_hierachy[col] / sum(cut_hierachy[col]), 2)
 
         cut_hierachy.sort_values(by=["Pos{}".format(i) for i in range(maxDepth)], ascending=False, inplace=True)
         header = pd.DataFrame(
-            {col: ("{} / {}".format(int(sum(cut_hierachy[col])), 2*estimators * 2 ** i) if i < maxDepth else "1") for
+            {col: ("{} / {}".format(int(sum(cut_hierachy[col])), estimators * 2 ** i) if i < maxDepth else "1") for
              i, col in enumerate(cut_hierachy.columns)}, index=["POSSIBLE"])
         cut_hierachy = header.append(cut_hierachy.astype(str))
 
@@ -376,6 +382,7 @@ class FullXGB():
 
         for depth in parsed_tree:
             parsed_tree[depth] = parsed_tree[depth] + ["Break"]
+
         return parsed_tree
 
 
@@ -398,6 +405,7 @@ class FullXGB():
         table : str
             Markdown table of results for better representation
         """
+        print("Searching for subgroups of depth {}.\n".format(search_depth))
         def get_deeper_node(parsed_tree, depth, deepest_node):
             # Get next node of the tree
             if depth == deepest_node:
@@ -406,7 +414,8 @@ class FullXGB():
                 return parsed_tree[depth].pop(0), 1
 
         all_tree_chains = []
-        for tree in self.trees: # Go through all trees / boosters
+        for t, tree in enumerate(self.trees): # Go through all trees / boosters
+            print("Searching in tree {}...".format(t))
             parsed_tree = self.parse_tree(tree) # Parse a single tree
 
             curr_tree_chains = [] # cut pattern for current tree
@@ -414,31 +423,37 @@ class FullXGB():
                 deepest_node = lowest_node+search_depth-1
                 copy_parsed_tree = {i: parsed_tree[i][:] for i in range(lowest_node, deepest_node+1)}
                 depth = lowest_node
-                chain = [0]*search_depth
+                chain = [0]*(2*search_depth-1)
                 depth_to_index = {d: i for i, d in enumerate(range(lowest_node, deepest_node+1))} #converts depth to list index
 
                 while True:
                     next_node, advance = get_deeper_node(copy_parsed_tree, depth, deepest_node) # get next node
 
                     chain[depth_to_index[depth]] = next_node # append node to chain, depth ends are marked with "Break"
+                    chain[search_depth-1+depth_to_index[depth]] = "<" if chain[search_depth-1+depth_to_index[depth]]==0 else ">"
                     depth += advance
                     isBreak = [True if node is "Break" else False for node in chain] # If break is contained update chain and move one step up
                     if any(isBreak):
                         depth = depth - 1
                         idx = np.where(isBreak)[0][0]
-                        chain[idx:] = [0] * (len(chain) - idx)
+                        chain[idx:search_depth] = [0] * (len(chain) - idx)
+                        chain[search_depth-1+idx:] = [0] * (len(chain) - idx)
 
                     elif all([True if node != 0 else False for node in chain]): # Chain is filled and valid
                         curr_tree_chains.append(chain[:])
+                        if any(["leaf" in node[1] for node in chain if node!="<" and node!=">"]):
+                            del curr_tree_chains[-1]
 
                     if copy_parsed_tree[depth] == []: # Can't move up in the tree
                         break
 
             all_tree_chains.append(curr_tree_chains)
 
+        self.weak_successions[search_depth] = self.weak_succession(all_tree_chains)
+        self.strong_successions[search_depth] = self.strong_succession(all_tree_chains)
         if as_md_table:
-            table = self.create_md_table(self.weak_succession(all_tree_chains), search_depth) + "\n\n"
-            table += self.create_md_table(self.strong_succession(all_tree_chains), search_depth) + "\n\n"
+            table = self.create_md_table(self.weak_successions[search_depth], search_depth) + "\n\n"
+            table += self.create_md_table(self.strong_successions[search_depth], search_depth) + "\n\n"
             return table
         else:
             return all_tree_chains
@@ -448,7 +463,7 @@ class FullXGB():
         The order of cuts does matter. A -> B != B -> A
         """
         succeding_nodes = [l for lists in trees_succeeding_nodes for l in lists]
-        succeding_names = [" | - | ".join([node[2] for node in nodes]) for nodes in succeding_nodes]
+        succeding_names = [" | - | ".join([node[2] for node in nodes if node!="<" and node !=">"]) for nodes in succeding_nodes]
         return Counter(succeding_names).most_common()
 
 
@@ -456,8 +471,9 @@ class FullXGB():
         """ Counts how often two features are cut one after the other with the same cut value.
         The order of cuts matters. A -> B != B -> A
         """
-        succeding_nodes = [l for lists in trees_succeeding_nodes for l in lists]
-        succeding_names = [" | - | ".join([" < ".join([node[2], node[3]]) for node in nodes]) for nodes in succeding_nodes]
+        succeding_nodes = [l+["=="] for lists in trees_succeeding_nodes for l in lists]
+        half_of_nodes_list = (len(succeding_nodes[0])//2)
+        succeding_names = [" | - | ".join([" {} ".format(nodes[i+half_of_nodes_list]).join([nodes[i][2], nodes[i][3]]) for i in range(half_of_nodes_list)]) for nodes in succeding_nodes]
         return Counter(succeding_names).most_common()
 
     def create_md_table(self, succeding_nodes, depth):
@@ -493,7 +509,7 @@ class FullXGB():
         return table
 
 
-    def cuts_per_feature(self):
+    def cuts_per_feature(self, md_table=True):
         """ Determine the number of times a feature was cut at a certain value.
 
         Returns
@@ -504,21 +520,25 @@ class FullXGB():
         cut_monitor = defaultdict(list)
         for tree in self.trees:
             for node in tree:
-                feature = node[2]
-                cut = node[3]
-                cut_monitor[feature].append(cut)
+                if "leaf" not in node[1]:
+                    feature = node[2]
+                    cut = node[3]
+                    cut_monitor[feature].append(cut)
 
         for feature in cut_monitor:
             cut_monitor[feature] = Counter(cut_monitor[feature]).most_common()
 
-        table = "| {:<40} | {:<15} | {:<10} |\n".format("Feature", "Value", "#Cuts")
-        table += "| {} | {} | {} |\n".format("-" * 40, "-" * 15, "-" * 10)
-        for feature in cut_monitor:
-            table += "| {:<40} | {:<15} | {:<10} |\n".format(feature, "", sum([value[1] for value in cut_monitor[feature]]))
-            table += "".join(
-                ["| {:<40} | {:<15} | {:<10} |\n".format("", cuts[0], cuts[1]) for cuts in cut_monitor[feature]])
+        if md_table:
+            table = "| {:<40} | {:<15} | {:<10} |\n".format("Feature", "Value", "#Cuts")
+            table += "| {} | {} | {} |\n".format("-" * 40, "-" * 15, "-" * 10)
+            for feature in cut_monitor:
+                table += "| {:<40} | {:<15} | {:<10} |\n".format(feature, "", sum([value[1] for value in cut_monitor[feature]]))
+                table += "".join(
+                    ["| {:<40} | {:<15} | {:<10} |\n".format("", cuts[0], cuts[1]) for cuts in cut_monitor[feature]])
 
-        return table
+            return table
+        else:
+            return cut_monitor
 
 
     def feature_wise_analysis(self, train_x, train_y, val_x, val_y, max_features=10):
@@ -555,7 +575,7 @@ class FullXGB():
         sorted_idx = np.argsort(important_values)[::-1]
         important_names = np.array(important_names)[sorted_idx]
 
-        max_thresh = max_features+1 if len(important_names) > max_features+1 else len(important_names)
+        max_thresh = max_features+1 if len(important_names) > max_features+1 else len(important_names)+1
 
         # Tableheader
         importance_text = "| {:<50} | {:<8} | {:<8} | {:<8} |\n".format("Used features (Cumulative)", "Accuracy", "ROC AUC", "F1-Score")
@@ -602,13 +622,16 @@ class FullXGB():
         for i in range(len(self.trees)):
             if i % step == 0:
                 print("Plotting tree {} / {}...".format(i, len(self.trees)))
-                xgboost.plot_tree(self.model, num_trees=i)
-                fig = matplotlib.pyplot.gcf()
-                fig.set_size_inches(50, 25)
-                ax = plt.gca()
-                ax.set_title("Tree {}".format(i))
+                try:
+                    xgboost.plot_tree(self.model, num_trees=i)
+                    fig = matplotlib.pyplot.gcf()
+                    fig.set_size_inches(50, 25)
+                    ax = plt.gca()
+                    ax.set_title("Tree {}".format(i))
 
-                fig_trees.append(fig)
+                    fig_trees.append(fig)
+                except ValueError:
+                    print("Bad tree {}".format(i))
 
         return fig_trees
 
@@ -633,28 +656,72 @@ class FullXGB():
 
         # Patterns in 1D
         hierarchy = self.cuts_hierarchy()
+        monitor = self.cuts_per_feature(md_table=False)
         most_important_features = hierarchy.index[1:6].values
         for feature in most_important_features:
-            fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(30, 20))
+            fig, ax1 = plt.subplots(nrows=1, ncols=1, figsize=(30, 20))
             fig.suptitle(feature)
 
-            ax1.hist(val_x.loc[val_y==0, feature], label="Label 0", histtype="step")
-            ax1.hist(val_x.loc[val_y==1, feature], label="Label 1", histtype="step")
+            ax1.hist(val_x.loc[val_y==0, feature], label="Label 0", histtype="step", bins=20)
+            ax1.hist(val_x.loc[val_y==1, feature], label="Label 1", histtype="step", bins=20)
+
+            important_cuts = [float(cut[0]) for cut in monitor[feature]][:3]
+            for i, cut in enumerate(important_cuts):
+                if i == 0:
+                    ax1.axvline(x=cut, color="r", linewidth=5, label="Cuts")
+                else:
+                    ax1.axvline(x=cut, color="r", linewidth=5/(i+1))
+                plt.text(cut, ax1.get_ylim()[1], str(round(cut, 2)), rotation=0, color="r")
             ax1.set_xlabel(feature)
             ax1.set_ylabel("Count")
             ax1.legend()
 
             figs.append(fig)
+            plt.close()
 
         # Patterns in 2D
-        patterns = self.find_subgroup_of_cuts(search_depth=2, as_md_table=False)
-        weak_successions = self.weak_succession(patterns)
+        weak_successions = self.weak_successions[2]
         for succession in weak_successions[:5]:
             features = succession[0].split(" | - | ")
             temp_data_0 = val_x.loc[val_y==0, features]
             temp_data_1 = val_x.loc[val_y==1, features]
 
-            fig, (ax0, ax1) = plt.subplots(nrows=1, ncols=2, figsize=(30,20), sharey=True, sharex=True)
+
+            fig, axScatter = plt.subplots(figsize=(30, 20))
+
+            # the scatter plot:
+            x0 = temp_data_0.iloc[:, 0].values
+            x1 = temp_data_1.iloc[:, 0].values
+            y0 = temp_data_0.iloc[:, 1].values
+            y1 = temp_data_1.iloc[:, 1].values
+
+            axScatter.scatter(x0, y0, color="blue", marker="_", alpha=0.4, s=50, label="Label 0")
+            axScatter.scatter(x1, y1, color="red", marker="P", alpha=0.4, s=50, label="Label 1")
+            axScatter.set_xlabel(features[0])
+            axScatter.set_ylabel(features[1])
+            axScatter.legend()
+            axScatter.set_aspect(1.)
+
+            # create new axes on the right and on the top of the current axes
+            # The first argument of the new_vertical(new_horizontal) method is
+            # the height (width) of the axes to be created in inches.
+            divider = make_axes_locatable(axScatter)
+            axHistx = divider.append_axes("top", 2., pad=0.1, sharex=axScatter)
+            axHisty = divider.append_axes("right", 2., pad=0.1, sharey=axScatter)
+
+            # make some labels invisible
+            axHistx.xaxis.set_tick_params(labelbottom=False)
+            axHisty.yaxis.set_tick_params(labelleft=False)
+
+            axHistx.hist(x0, color="blue", histtype="step")
+            axHistx.hist(x1, color="red", histtype="step")
+            axHisty.hist(y0, orientation='horizontal', color="blue", histtype="step")
+            axHisty.hist(y1, orientation='horizontal', color="red", histtype="step")
+            figs.append(fig)
+            plt.close()
+
+
+            fig, (ax0, ax1) = plt.subplots(nrows=1, ncols=2, figsize=(30, 20), sharey=True, sharex=True)
 
             h, _, _, im = ax0.hist2d(temp_data_0.iloc[:, 0], temp_data_0.iloc[:, 1])
             plt.colorbar(im, ax=ax0)
@@ -668,31 +735,74 @@ class FullXGB():
             ax1.set_ylabel(features[1])
             ax1.set_title("Label 1")
 
+            fig.suptitle(succession)
             figs.append(fig)
+            plt.close()
 
         # patterns in >2D
-        patterns = self.find_subgroup_of_cuts(search_depth=search_depth, as_md_table=False)
-        strong_successions = self.strong_succession(patterns)
+        strong_successions = self.strong_successions[search_depth]
         cut_partitioning = {}
         temp_figs = []
         for succession in strong_successions[:5]:
             features = succession[0].split(" | - | ")
-            features_cuts = [f.split(" < ") for f in features]
+            operations = []
+            features_cuts = []
+
+            for i, f in enumerate(features):
+                if " < " in f:
+                    operations.append("<")
+                    features_cuts.append(f.split(" < "))
+                if " > " in f:
+                    operations.append(">=")
+                    features_cuts.append(f.split(" > "))
+                if " == " in f:
+                    operations.append("=")
+                    features_cuts.append(f.split(" == "))
+
             temp_x = val_x.copy()
             temp_x["Label"] = val_y
-            for feature_cut in features_cuts:
-                temp_x = temp_x.loc[temp_x[feature_cut[0]] < float(feature_cut[1]), :]
+            for operation, feature_cut in zip(operations[:-1], features_cuts[:-1]):
+                if operation == "<":
+                    temp_x = temp_x.loc[temp_x[feature_cut[0]] < float(feature_cut[1]), :]
+                elif operation == ">=":
+                    temp_x = temp_x.loc[temp_x[feature_cut[0]] >= float(feature_cut[1]), :]
 
-            temp_y = temp_x["Label"]
-            temp_x.drop("Label", inplace=True, axis=1)
-
-            fig = self.plot_confidence(val_x=temp_x, val_y=temp_y)
+            fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(30,20))
             fig.suptitle(succession)
+
+            print(features_cuts)
+            print(temp_x.loc[temp_x["Label"].values==0].shape)
+            print(temp_x.loc[temp_x["Label"].values==1].shape)
+            ax.hist(temp_x.loc[temp_x["Label"].values==0, features_cuts[-1][0]], label="Label 0", histtype="step", bins=20)
+            ax.hist(temp_x.loc[temp_x["Label"].values==1, features_cuts[-1][0]], label="Label 1", histtype="step", bins=20)
+            ax.axvline(x=float(features_cuts[-1][1]), color="y")
+            ax.set_xlabel(features_cuts[-1][0])
+            ax.set_ylabel("Count")
+            ax.legend()
             temp_figs.append(fig)
 
-            dec = sum(temp_y==0)
-            inc = sum(temp_y==1)
-            cut_partitioning[succession] = (dec, inc, sum(val_y==0)-dec, sum(val_y==1)-inc)
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(nrows=2, ncols=2, figsize=(30,20))
+            temp_X_smaller = temp_x.loc[temp_x[features_cuts[-1][0]]<float(features_cuts[-1][1]), :]
+            temp_Y_smaller = temp_X_smaller["Label"]
+            temp_X_smaller.drop("Label", axis=1, inplace=True)
+            predProba = self.model.predict_proba(temp_X_smaller)
+            ax1 = plot_confidence_in_predicted_label(temp_Y_smaller, predProba, ax=ax1)
+            ax3 = plot_confidence_in_true_label(temp_Y_smaller, predProba, ax=ax3)
+
+            temp_X_greater = temp_x.loc[temp_x[features_cuts[-1][0]] >= float(features_cuts[-1][1]), :]
+            temp_Y_greater = temp_X_greater["Label"]
+            temp_X_greater.drop("Label", axis=1, inplace=True)
+            predProba = self.model.predict_proba(temp_X_greater)
+            ax2 = plot_confidence_in_predicted_label(temp_Y_greater, predProba, ax=ax2)
+            ax4 = plot_confidence_in_true_label(temp_Y_greater, predProba, ax=ax4)
+            temp_figs.append(fig)
+
+            title = str(features[:-1]) + "\nLeft: {}".format(features[-1]).replace("==", "<")
+            fig.suptitle(title)
+
+            dec = sum(temp_Y_smaller==0)
+            inc = sum(temp_Y_smaller==1)
+            cut_partitioning[succession] = (dec, inc, sum(temp_x["Label"]==0)-dec, sum(temp_x["Label"])-inc)
 
         # Summary plot
         bars_0 = []
@@ -780,8 +890,8 @@ class FullXGB():
             pass
 
         # Train model
-        self.train(train_x, train_y, val_x, val_y)
 
+        self.train(train_x, train_y, val_x, val_y)
         # Save importance plot
         fig = self.plot_importances(limit=importance_limit)
         fig.savefig("{}/Importances.png".format(self.save_folder))
@@ -804,6 +914,7 @@ class FullXGB():
         hierarchy.to_csv(self.save_folder+"/cut_hierachy.csv")
 
         # Save detailed information about used cuts and subgroups
+        print("Constructing markdown tables.")
         md_table = "# XGBoost full analysis of cuts\n"
         md_table += "Contains the following information:\n"
         md_table += "- [Cumulative importance](#cumulative-importance)\n"
@@ -811,7 +922,7 @@ class FullXGB():
         md_table += "- [2 successive cuts](#2-cuts)\n"
         md_table += "- [3 successive cuts](#3-cuts)\n\n\n\n"
         md_table += "#### Cumulative Importance\n"
-        md_table += self.feature_wise_analysis(train_x, train_y, val_x, val_y)
+        md_table += self.feature_wise_analysis(train_x, train_y, val_x, val_y, max_features=importance_limit)
         md_table += "#### Exact cuts\n"
         md_table += self.cuts_per_feature()
         md_table += "#### 2 Cuts\n"
@@ -821,21 +932,22 @@ class FullXGB():
         with open("{}/FeatureImportance.md".format(self.save_folder), "w") as f:
             f.write(md_table)
 
+        # Plot important subgroups
+        print("Constructing important subgroup plots")
+        figs = self.plot_subgroups(val_x, val_y, search_depth=3)
+        savefig(figs, self.save_folder + "/subgroups.pdf")
+
         # Plot trees
         if tree_plot_step:
             figs = self.plot_trees(step=tree_plot_step)
-            savefig(figs, self.save_folder + "/trees.pdf")
-
-        # Plot important subgroups
-        figs = self.plot_subgroups(val_x, val_y, search_depth=3)
-        savefig(figs, self.save_folder + "/subgroups.pdf")
+            if figs != []:
+                savefig(figs, self.save_folder + "/trees.pdf")
 
         # Save model
         if save_model:
             self.save_model()
 
         print("Everything saved into {}/.".format(self.save_folder))
-
 
 
 if __name__ == "__main__":
@@ -863,8 +975,8 @@ if __name__ == "__main__":
     # Define parameters
     ####
 
-    maxDepth = 3
-    estimators = 5
+    maxDepth = 5
+    estimators = 10
     instances = [50, 100, 250, 500, 1000, 2000, 5000, 10000, 25000, 50000, 75000, 100000, 125000, 150000, 200000, 250000, 300000]
     # instances = [150000]
 
@@ -873,4 +985,4 @@ if __name__ == "__main__":
     ####
 
     full_xgb = FullXGB(depth=maxDepth, estimator=estimators, path=".", name="PredictSalary", train_instances=instances)
-    full_xgb.full_analysis(train_x=train_x, train_y=train_y, val_x=val_x, val_y=val_y, importance_limit=20, tree_plot_step=20)
+    full_xgb.full_analysis(train_x=train_x, train_y=train_y, val_x=val_x, val_y=val_y, importance_limit=10, tree_plot_step=4)

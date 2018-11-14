@@ -79,14 +79,13 @@ def plot_confidence_in_true_label(labels, predProba=None, data=None, model=None,
         color.append(["#003668", "#8B0000", "#000000"][i])
         color.append(["#7fa1c1", "#d09999", "#7F7F7F"][i])
 
-    ax.hist(X, histtype="barstacked", bins=20, label=label, color=color)
+    ax.hist(X, histtype="barstacked", bins=20, label=label, color=color, range=(0,1 ))
     ax.axvline(x=1/nr_classes, color="k", linewidth=3, linestyle="--", alpha=0.6)
     ax.axvline(x=0.5, color="k", linewidth=3, linestyle="--", alpha=0.6)
     ax.legend(fontsize=20)
     ax.set_xlabel("P(pred)")
     ax.set_ylabel("Count")
     ax.set_title("True label vs. confidence (Recall)\n(True: Recall, False: Precision)",fontsize=20)
-    ax.set_xticks(np.arange(0, 1.15, 0.1))
 
     return fig, ax
 
@@ -151,14 +150,13 @@ def plot_confidence_in_predicted_label(labels, predProba=None, data=None, model=
         color.append(["#003668", "#8B0000", "#000000"][i])
         color.append(["#7fa1c1", "#d09999", "#7F7F7F"][i])
 
-    ax.hist(X, histtype="barstacked", bins=20, label=label, color=color)
+    ax.hist(X, histtype="barstacked", bins=20, label=label, color=color, range=(0,1))
     ax.axvline(x=1/nr_classes, color="k", linewidth=3, linestyle="--", alpha=0.6)
     ax.axvline(x=0.5, color="k", linewidth=3, linestyle="--", alpha=0.6)
     ax.legend(fontsize=20)
     ax.set_xlabel("P(pred)")
     ax.set_ylabel("Count")
     ax.set_title("Predicted label vs confidence (Precision)\n(True: Recall, False: Precision)", fontsize=20)
-    ax.set_xticks(np.arange(0, 1.15, 0.1))
 
     return fig, ax
 
